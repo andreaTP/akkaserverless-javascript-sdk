@@ -98,7 +98,7 @@ class ValueEntityHandler {
 
         return (command, ctx) => {
           let updatedAnyState = null,
-              deleted = false;
+          deleted = false;
 
           /**
            * Context for an value entity command.
@@ -118,6 +118,7 @@ class ValueEntityHandler {
            * @param {module:akkaserverless.Serializable} newState The state to store.
            */
           ctx.context.updateState = (newState) => {
+            console.dir(newState);
             ctx.ensureActive();
             if (newState === null) throw new Error("Entity state cannot be set to 'null'")
             if (deleted) deleted = false; // update after delete cancels delete
@@ -134,23 +135,27 @@ class ValueEntityHandler {
             deleted = true;
           }
 
-          const userReply = this.entity.commandHandlers[commandName](command, state, ctx.context);
+          const nextAction = (userReply) => {
+            if (deleted) {
+              ctx.reply.stateAction = { delete: {} };
+              this.anyState = null;
+              ctx.commandDebug("Deleting state '%s'", this.entityId);
+            } else if (updatedAnyState !== null) {
+              ctx.reply.stateAction = {
+                update: {
+                  value: updatedAnyState
+                }
+              };
+              this.anyState = updatedAnyState; // already serialized
+              ctx.commandDebug("Updating state '%s'", updatedAnyState.type_url);
+            }
+            return userReply;
+          };
 
-          if (deleted) {
-            ctx.reply.stateAction = { delete: {} };
-            this.anyState = null;
-            ctx.commandDebug("Deleting state '%s'", this.entityId);
-          } else if (updatedAnyState !== null) {
-            ctx.reply.stateAction = {
-              update: {
-                value: updatedAnyState
-              }
-            };
-            this.anyState = updatedAnyState; // already serialized
-            ctx.commandDebug("Updating state '%s'", updatedAnyState.type_url);
-          }
-
-          return userReply;
+          return {
+            userReply: Promise.resolve(this.entity.commandHandlers[commandName](command, state, ctx.context)),
+            next: nextAction
+          };
         };
       } else {
         return null;

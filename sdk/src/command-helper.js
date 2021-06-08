@@ -61,6 +61,21 @@ module.exports = class CommandHelper {
       })
     } else {
 
+      const onError = (err) => {
+        const error = "Error handling command '" + command.name + "'";
+        ctx.commandDebug(error);
+        console.error(err);
+
+        this.call.write({
+          failure: {
+            commandId: command.id,
+            description: error + ": " + err
+          }
+        });
+  
+        this.call.end();
+      }
+
       try {
         const grpcMethod = this.service.methods[command.name];
 
@@ -77,8 +92,13 @@ module.exports = class CommandHelper {
 
           ctx.streamed = command.streamed;
 
-          this.invokeHandler(() => handler(deserCommand, ctx), ctx, grpcMethod, reply => { return {reply}; }, "Command");
-
+          this.invokeHandler(
+            () => handler(deserCommand, ctx),
+            ctx,
+            grpcMethod,
+            reply => { return {reply}; },
+            "Command",
+            onError)
         } else {
           const msg = "No handler registered for command '" + command.name + "'";
           ctx.commandDebug(msg);
@@ -90,40 +110,40 @@ module.exports = class CommandHelper {
           })
         }
       } catch (err) {
-        const error = "Error handling command '" + command.name + "'";
-        ctx.commandDebug(error);
-        console.error(err);
-
-        this.call.write({
-          failure: {
-            commandId: command.id,
-            description: error + ": " + err
-          }
-        });
-
-        this.call.end();
+        onError(err);
       }
     }
 
   }
 
-  invokeHandler(handler, ctx, grpcMethod, createReply, desc) {
-    ctx.reply = {};
-    let userReply = null;
-    try {
-      userReply = handler();
-    } catch (err) {
-      if (ctx.error === null) {
-        // If the error field isn't null, then that means we were explicitly told
-        // to fail, so we can ignore this thrown error and fail gracefully with a
-        // failure message. Otherwise, we rethrow, and handle by closing the connection
-        // higher up.
-        throw err;
-      }
-    } finally {
-      ctx.active = false;
-    }
+  invokeHandler(handler, ctx, grpcMethod, createReply, desc, onError) {
+    const {userReply, next} = handler();
+    Promise.resolve(userReply)
+      .then(userReply => {
+        ctx.reply = {};
+        this.invokeHandlerAsync(userReply, ctx, grpcMethod, createReply, desc);
+      })
+      .catch((err) => {
+        // TODO: verify-again this logic
+        if (ctx.error === null) {
+          // If the error field isn't null, then that means we were explicitly told
+          // to fail, so we can ignore this thrown error and fail gracefully with a
+          // failure message. Otherwise, we rethrow, and handle by closing the connection
+          // higher up.
+          if (onError !== undefined) {
+            onError(err);
+          };
+        }
+      })
+      .then(userReply => {
+        if (next !== undefined) {
+          next(userReply);
+        };
+      })
+      .finally(() => ctx.active = false)
+  }
 
+  invokeHandlerAsync(userReply, ctx, grpcMethod, createReply, desc) {
     if (ctx.error !== null) {
       ctx.commandDebug("%s failed with message '%s'", desc, ctx.error.message);
       this.call.write({
